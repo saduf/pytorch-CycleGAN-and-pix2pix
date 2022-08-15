@@ -4,6 +4,7 @@ import sys
 import ntpath
 import time
 from . import util, html
+import matplotlib.pyplot as plt
 from subprocess import Popen, PIPE
 
 
@@ -34,22 +35,52 @@ def save_images(webpage, visuals, image_path, aspect_ratio=1.0, width=256, use_w
     short_path = ntpath.basename(image_path[0])
     name = os.path.splitext(short_path)[0]
 
+    # print('image_dir: {} - short_path: {} - name: {}'.format(image_dir, short_path, name))
+
     webpage.add_header(name)
     ims, txts, links = [], [], []
     ims_dict = {}
     for label, im_data in visuals.items():
-        im = util.tensor2im(im_data)
-        image_name = '%s_%s.png' % (name, label)
-        save_path = os.path.join(image_dir, image_name)
-        util.save_image(im, save_path, aspect_ratio=aspect_ratio)
-        ims.append(image_name)
-        txts.append(label)
-        links.append(image_name)
+        if 'gating_out' in label:
+            # print('Number of gates: {}'.format(len(im_data[0])))
+            # print('Gates type: {}'.format(type(im_data)))
+            for idx, gates_output in enumerate(im_data[0]):
+                image_name1 = '{}_g1_{}_{}.png'.format(name, idx, 1)
+                image_name2 = '{}_g2_{}_{}.png'.format(name, idx, 2)
+                show_tensor(gates_output, image_name1, image_name2, 1, image_dir)
+                ims.append(image_name1)
+                ims.append(image_name2)
+                txts.append(label)
+                txts.append(label)
+                links.append(image_name1)
+                links.append(image_name2)
+        else:
+            im = util.tensor2im(im_data)
+            image_name = '%s_%s.png' % (name, label)
+            save_path = os.path.join(image_dir, image_name)
+            util.save_image(im, save_path, aspect_ratio=aspect_ratio)
+            ims.append(image_name)
+            txts.append(label)
+            links.append(image_name)
         if use_wandb:
             ims_dict[label] = wandb.Image(im)
     webpage.add_images(ims, txts, links, width=width)
     if use_wandb:
         wandb.log(ims_dict)
+
+
+# Show the tensor.
+def show_tensor(gates_output, save_name_g1, save_name_g2, block_number, save_dir):
+    save1 = save_dir + os.path.sep + save_name_g1
+    save2 = save_dir + os.path.sep + save_name_g2
+    g1, g2 = gates_output
+    plt.figure()
+    plt.imshow(g1.cpu().numpy(), aspect='auto')
+    plt.colorbar()
+    plt.savefig(save1)
+    plt.imshow(g2.cpu().numpy(), aspect='auto')
+    plt.colorbar()
+    plt.savefig(save2)
 
 
 class Visualizer():
@@ -78,7 +109,7 @@ class Visualizer():
         self.use_wandb = opt.use_wandb
         self.current_epoch = 0
         self.ncols = opt.display_ncols
-        
+
         if self.display_id > 0:  # connect to a visdom server given <display_port> and <display_server>
             import visdom
             self.vis = visdom.Visdom(server=opt.display_server, port=opt.display_port, env=opt.display_env)

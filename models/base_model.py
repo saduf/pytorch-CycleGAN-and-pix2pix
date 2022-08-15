@@ -152,12 +152,14 @@ class BaseModel(ABC):
                 save_filename = '%s_net_%s.pth' % (epoch, name)
                 save_path = os.path.join(self.save_dir, save_filename)
                 net = getattr(self, 'net' + name)
-
-                if len(self.gpu_ids) > 0 and torch.cuda.is_available():
-                    torch.save(net.module.cpu().state_dict(), save_path)
-                    net.cuda(self.gpu_ids[0])
+                if 'GN' in name:
+                    self.save_checkpoints(net, name, epoch)
                 else:
-                    torch.save(net.cpu().state_dict(), save_path)
+                    if len(self.gpu_ids) > 0 and torch.cuda.is_available():
+                        torch.save(net.module.cpu().state_dict(), save_path)
+                        net.cuda(self.gpu_ids[0])
+                    else:
+                        torch.save(net.cpu().state_dict(), save_path)
 
     def __patch_instance_norm_state_dict(self, state_dict, module, keys, i=0):
         """Fix InstanceNorm checkpoints incompatibility (prior to 0.4)"""
@@ -184,19 +186,26 @@ class BaseModel(ABC):
                 load_filename = '%s_net_%s.pth' % (epoch, name)
                 load_path = os.path.join(self.save_dir, load_filename)
                 net = getattr(self, 'net' + name)
-                if isinstance(net, torch.nn.DataParallel):
-                    net = net.module
-                print('loading the model from %s' % load_path)
-                # if you are using PyTorch newer than 0.4 (e.g., built from
-                # GitHub source), you can remove str() on self.device
-                state_dict = torch.load(load_path, map_location=str(self.device))
-                if hasattr(state_dict, '_metadata'):
-                    del state_dict._metadata
 
-                # patch InstanceNorm checkpoints prior to 0.4
-                for key in list(state_dict.keys()):  # need to copy keys here because we mutate in loop
-                    self.__patch_instance_norm_state_dict(state_dict, net, key.split('.'))
-                net.load_state_dict(state_dict)
+                if 'GN' in name:
+                    self.load_gating_ckpt(net, epoch, name)
+                else:
+                    if isinstance(net, torch.nn.DataParallel):
+                        net = net.module
+                    print('loading the model from %s' % load_path)
+                    # if you are using PyTorch newer than 0.4 (e.g., built from
+                    # GitHub source), you can remove str() on self.device
+                    state_dict = torch.load(load_path, map_location=str(self.device))
+                    if hasattr(state_dict, '_metadata'):
+                        del state_dict._metadata
+
+                    # patch InstanceNorm checkpoints prior to 0.4
+                    for key in list(state_dict.keys()):  # need to copy keys here because we mutate in loop
+                        self.__patch_instance_norm_state_dict(state_dict, net, key.split('.'))
+                    net.load_state_dict(state_dict)
+
+                    if 'E' == name:
+                        net.eval()
 
     def print_networks(self, verbose):
         """Print the total number of parameters in the network and (if verbose) network architecture
@@ -209,8 +218,13 @@ class BaseModel(ABC):
             if isinstance(name, str):
                 net = getattr(self, 'net' + name)
                 num_params = 0
-                for param in net.parameters():
-                    num_params += param.numel()
+                if 'GN' in name:
+                    for g1,g2 in net:
+                        for param1, param2 in zip(g1.parameters(), g2.parameters()):
+                            num_params += param1.numel() + param2.numel()
+                else:
+                    for param in net.parameters():
+                        num_params += param.numel()
                 if verbose:
                     print(net)
                 print('[Network %s] Total number of parameters : %.3f M' % (name, num_params / 1e6))
@@ -228,3 +242,55 @@ class BaseModel(ABC):
             if net is not None:
                 for param in net.parameters():
                     param.requires_grad = requires_grad
+
+    def save_checkpoints(self, gating_network, model_name, epoch):
+        # print('len(gating_network: {})'.format(len(gating_network)))
+        for idxe, gating_head in enumerate(gating_network):
+            g = gating_head
+            # print('len(gating_head: {})'.format(len(gating_head)))
+            # print('len(g): {}'.format(len(g)))
+            save_path = f"{self.save_dir}/gates/{str(epoch).zfill(6) + '_' + str(model_name) + '_' + str(idxe)}.pt"
+            g1_key = 'g1_' + str(model_name) + '_' + str(idxe)
+            g2_key = 'g2_' + str(model_name) + '_' + str(idxe)
+            if len(self.gpu_ids) > 0 and torch.cuda.is_available():
+                torch.save(
+                    {
+                        g1_key: g[0].module.cpu().state_dict(),
+                        g2_key: g[1].module.cpu().state_dict()
+                    },
+                    save_path,
+                )
+                g[0].cuda(self.gpu_ids[0])
+                g[1].cuda(self.gpu_ids[0])
+            else:
+                g = gating_head
+                torch.save(
+                    {
+                        g1_key: g[0].cpu().state_dict(),
+                        g2_key: g[1].cpu().state_dict()
+                    },
+                    save_path,
+                )
+
+    def load_gating_ckpt(self, gating_network, ckpt_no, model_name):
+        print('len(gating_network: {})'.format(len(gating_network)))
+        for idxe, gating_head in enumerate(gating_network):
+            load_path = f"{self.save_dir}/gates/{str(ckpt_no).zfill(6) + '_' + str(model_name) + '_' + str(idxe)}.pt"
+            print('loading the model from %s' % load_path)
+            g = gating_head
+            print('len(gating_head: {})'.format(len(gating_head)))
+            print('len(g): {}'.format(len(g)))
+            # for idxi, g in enumerate(gating_head):
+            g1_key = 'g1_' + str(model_name) + '_' + str(idxe)
+            g2_key = 'g2_' + str(model_name) + '_' + str(idxe)
+            state_dict = torch.load(load_path, map_location=str(self.device))
+            if hasattr(state_dict, '_metadata'):
+                del state_dict._metadata
+            if isinstance(g[0], torch.nn.DataParallel):
+                g[0].module.load_state_dict(state_dict[g1_key])
+                g[1].module.load_state_dict(state_dict[g2_key])
+            else:
+                g[0].load_state_dict(state_dict[g1_key])
+                g[1].load_state_dict(state_dict[g2_key])
+            g[0].eval()
+            g[1].eval()

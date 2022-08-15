@@ -1,5 +1,6 @@
 from .base_model import BaseModel
 from . import networks
+import torch
 
 
 class TestModel(BaseModel):
@@ -39,15 +40,21 @@ class TestModel(BaseModel):
         # specify the training losses you want to print out. The training/test scripts  will call <BaseModel.get_current_losses>
         self.loss_names = []
         # specify the images you want to save/display. The training/test scripts  will call <BaseModel.get_current_visuals>
-        self.visual_names = ['real', 'fake']
+        self.visual_names = ['real', 'fake', 'gating_out']
+        # self.visual_names = ['real', 'fake']
         # specify the models you want to save to the disk. The training/test scripts will call <BaseModel.save_networks> and <BaseModel.load_networks>
-        self.model_names = ['G' + opt.model_suffix]  # only generator is needed.
+        self.model_names = ['G' + opt.model_suffix, 'E', 'GN' + opt.model_suffix]  # only generator is needed + Embedder + Gating Network
         self.netG = networks.define_G(opt.input_nc, opt.output_nc, opt.ngf, opt.netG,
                                       opt.norm, not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
+        self.netE = networks.define_E(opt.output_nc, opt.embedder_classes, opt.init_type, opt.init_gain, self.gpu_ids)
+        self.netGN = networks.get_gating_heads(opt.gating_heads, opt.gating_in_nc, opt.gating_out_nc, opt.init_type,
+                                                 opt.init_gain, self.gpu_ids)
 
         # assigns the model to self.netG_[suffix] so that it can be loaded
         # please see <BaseModel.load_networks>
         setattr(self, 'netG' + opt.model_suffix, self.netG)  # store netG in self.
+        setattr(self, 'netE', self.netE)  # store netE in self.
+        setattr(self, 'netGN' + opt.model_suffix, self.netGN) # store Gating Network in self.
 
     def set_input(self, input):
         """Unpack input data from the dataloader and perform necessary pre-processing steps.
@@ -62,7 +69,11 @@ class TestModel(BaseModel):
 
     def forward(self):
         """Run forward pass."""
-        self.fake = self.netG(self.real)  # G(real)
+        self.embedder_out, fc1_output = self.netE(self.real)
+        self.fc1_out = torch.flatten(torch.nn.functional.softmax(fc1_output, dim = 1), 1)
+        # self.fc1_out = torch.flatten(fc1_output, 1)
+        self.gating_out = networks.get_gating_outputs([self.netGN], self.fc1_out)
+        self.fake = self.netG(self.real, self.gating_out[0])  # G(real)
 
     def optimize_parameters(self):
         """No optimization for test model."""

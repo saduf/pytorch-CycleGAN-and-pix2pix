@@ -26,8 +26,12 @@ class UnalignedDataset(BaseDataset):
         self.dir_A = os.path.join(opt.dataroot, opt.phase + 'A')  # create a path '/path/to/data/trainA'
         self.dir_B = os.path.join(opt.dataroot, opt.phase + 'B')  # create a path '/path/to/data/trainB'
 
-        self.A_paths = sorted(make_dataset(self.dir_A, opt.max_dataset_size))   # load images from '/path/to/data/trainA'
-        self.B_paths = sorted(make_dataset(self.dir_B, opt.max_dataset_size))    # load images from '/path/to/data/trainB'
+        # self.A_paths, self.A_targets = sorted(make_dataset(self.dir_A, opt.max_dataset_size))   # load images from '/path/to/data/trainA'
+        # self.B_paths, self.B_targets = sorted(make_dataset(self.dir_B, opt.max_dataset_size))    # load images from '/path/to/data/trainB'
+        A_paths, A_targets = make_dataset(self.dir_A, opt.max_dataset_size)  # load images from '/path/to/data/trainA'
+        self.A_paths, self.A_targets = zip(*sorted(zip(A_paths, A_targets)))
+        B_paths, B_targets = make_dataset(self.dir_B, opt.max_dataset_size)   # load images from '/path/to/data/trainB'
+        self.B_paths, self.B_targets = zip(*sorted(zip(B_paths, B_targets)))
         self.A_size = len(self.A_paths)  # get the size of dataset A
         self.B_size = len(self.B_paths)  # get the size of dataset B
         btoA = self.opt.direction == 'BtoA'
@@ -59,8 +63,10 @@ class UnalignedDataset(BaseDataset):
         # apply image transformation
         A = self.transform_A(A_img)
         B = self.transform_B(B_img)
+        A_target = self.A_targets[index % self.A_size]
+        B_target = self.B_targets[index_B]
 
-        return {'A': A, 'B': B, 'A_paths': A_path, 'B_paths': B_path}
+        return {'A': A, 'B': B, 'A_paths': A_path, 'B_paths': B_path, 'A_target': A_target, 'B_target': B_target}
 
     def __len__(self):
         """Return the total number of images in the dataset.

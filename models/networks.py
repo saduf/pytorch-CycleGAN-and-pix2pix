@@ -1,8 +1,10 @@
-import torch
-import torch.nn as nn
 from torch.nn import init
 import functools
 from torch.optim import lr_scheduler
+import threading
+from collections import defaultdict
+import torch
+import torch.nn as nn
 
 
 ###############################################################################
@@ -29,7 +31,8 @@ def get_norm_layer(norm_type='instance'):
     elif norm_type == 'instance':
         norm_layer = functools.partial(nn.InstanceNorm2d, affine=False, track_running_stats=False)
     elif norm_type == 'none':
-        def norm_layer(x): return Identity()
+        def norm_layer(x):
+            return Identity()
     else:
         raise NotImplementedError('normalization layer [%s] is not found' % norm_type)
     return norm_layer
@@ -109,14 +112,15 @@ def init_net(net, init_type='normal', init_gain=0.02, gpu_ids=[]):
     Return an initialized network.
     """
     if len(gpu_ids) > 0:
-        assert(torch.cuda.is_available())
+        assert (torch.cuda.is_available())
         net.to(gpu_ids[0])
         net = torch.nn.DataParallel(net, gpu_ids)  # multi-GPUs
     init_weights(net, init_type, init_gain=init_gain)
     return net
 
 
-def define_G(input_nc, output_nc, ngf, netG, norm='batch', use_dropout=False, init_type='normal', init_gain=0.02, gpu_ids=[]):
+def define_G(input_nc, output_nc, ngf, netG, norm='batch', use_dropout=False, init_type='normal', init_gain=0.02,
+             gpu_ids=[]):
     """Create a generator
 
     Parameters:
@@ -196,11 +200,93 @@ def define_D(input_nc, ndf, netD, n_layers_D=3, norm='batch', init_type='normal'
         net = NLayerDiscriminator(input_nc, ndf, n_layers=3, norm_layer=norm_layer)
     elif netD == 'n_layers':  # more options
         net = NLayerDiscriminator(input_nc, ndf, n_layers_D, norm_layer=norm_layer)
-    elif netD == 'pixel':     # classify if each pixel is real or fake
+    elif netD == 'pixel':  # classify if each pixel is real or fake
         net = PixelDiscriminator(input_nc, ndf, norm_layer=norm_layer)
     else:
         raise NotImplementedError('Discriminator model name [%s] is not recognized' % netD)
     return init_net(net, init_type, init_gain, gpu_ids)
+
+
+def define_E(input_nc, classes, init_type='normal', init_gain=0.02, gpu_ids=[]):
+    """Create a embedder
+
+    Parameters:
+        input_nc (int)     -- the number of channels in input images
+        classes (int)      -- number of classes in the classifier
+        init_type (str)    -- the name of the initialization method.
+        init_gain (float)  -- scaling factor for normal, xavier and orthogonal.
+        gpu_ids (int list) -- which GPUs the network runs on: e.g., 0,1,2
+
+    Returns an embedder
+    """
+
+    net = EmbeddingNetwork(input_nc, classes)
+    return init_net(net, init_type, init_gain, gpu_ids)
+
+
+def define_GN(input_nc, output_nc, init_type='normal', init_gain=0.02, gpu_ids=[]):
+    """Create a embedder
+
+    Parameters:
+        output_nc (int)     -- the number of channels in output (Resnet conv layers input)
+        init_type (str)    -- the name of the initialization method.
+        init_gain (float)  -- scaling factor for normal, xavier and orthogonal.
+        gpu_ids (int list) -- which GPUs the network runs on: e.g., 0,1,2
+
+    Returns an embedder
+    """
+
+    net = GatingNetwork(input_nc, output_nc)
+    return init_net(net, init_type, init_gain, gpu_ids)
+
+
+def get_gating_heads(head_count, input_nc, output_nc, init_type='normal', init_gain=0.02, gpu_ids=[]):
+    gating_heads = []
+    for i in range(head_count):
+        g1 = define_GN(input_nc, output_nc, init_type=init_type, init_gain=init_gain, gpu_ids=gpu_ids)
+        g2 = define_GN(input_nc, output_nc, init_type=init_type, init_gain=init_gain, gpu_ids=gpu_ids)
+        gating_heads.append((g1, g2))
+    return gating_heads
+
+
+def get_gates_params(gating_heads):
+    gating_params = []
+    for g_head in gating_heads:
+        g_head1, g_head2 = g_head
+        gating_params += list(g_head1.parameters()) + list(g_head2.parameters())
+    return gating_params
+
+def get_gating_outputs(gating_network, g_input):
+    retVal = []
+    # print('g_input.shape: {}'.format(g_input.shape))
+    for gate_heads in gating_network:
+        gate_outputs = []
+        for gate in gate_heads:
+            g1, g2 = gate
+            g1_out = g1(g_input)
+            g2_out = g2(g_input)
+            # print('g1_out.shape: {}'.format(g1_out.shape))
+            # print('g2_out.shape: {}'.format(g2_out.shape))
+            gate_outputs.append((g1_out, g2_out))
+        #     print("Gating outputs size: {}".format(len(retVal)))
+        retVal.append(gate_outputs)
+    return retVal
+
+
+def get_gating_l1_regularization(gating_outputs):
+    l1_regularization = 0
+    # print("len(gating_outputs): {}".format(len(gating_outputs)))
+    # print("type(gating_outputs): {}".format(type(gating_outputs)))
+    for gating_head_outputs in gating_outputs:
+        # print("len(gating_head_outputs): {}".format(len(gating_head_outputs)))
+        # print("type(gating_head_outputs): {}".format(type(gating_head_outputs)))
+        # for gh_output in gating_head_outputs:
+            # print("len(gh_output): {}".format(len(gh_output)))
+            # print("type(gh_output): {}".format(type(gh_output)))
+        g1_out, g2_out = gating_head_outputs
+        l1_regularization += torch.mean(torch.abs(g1_out))
+        l1_regularization += torch.mean(torch.abs(g2_out))
+    return l1_regularization
 
 
 ##############################################################################
@@ -290,13 +376,14 @@ def cal_gradient_penalty(netD, real_data, fake_data, device, type='mixed', const
     Returns the gradient penalty loss
     """
     if lambda_gp > 0.0:
-        if type == 'real':   # either use real images, fake images, or a linear interpolation of two.
+        if type == 'real':  # either use real images, fake images, or a linear interpolation of two.
             interpolatesv = real_data
         elif type == 'fake':
             interpolatesv = fake_data
         elif type == 'mixed':
             alpha = torch.rand(real_data.shape[0], 1, device=device)
-            alpha = alpha.expand(real_data.shape[0], real_data.nelement() // real_data.shape[0]).contiguous().view(*real_data.shape)
+            alpha = alpha.expand(real_data.shape[0], real_data.nelement() // real_data.shape[0]).contiguous().view(
+                *real_data.shape)
             interpolatesv = alpha * real_data + ((1 - alpha) * fake_data)
         else:
             raise NotImplementedError('{} not implemented'.format(type))
@@ -306,7 +393,7 @@ def cal_gradient_penalty(netD, real_data, fake_data, device, type='mixed', const
                                         grad_outputs=torch.ones(disc_interpolates.size()).to(device),
                                         create_graph=True, retain_graph=True, only_inputs=True)
         gradients = gradients[0].view(real_data.size(0), -1)  # flat the data
-        gradient_penalty = (((gradients + 1e-16).norm(2, dim=1) - constant) ** 2).mean() * lambda_gp        # added eps
+        gradient_penalty = (((gradients + 1e-16).norm(2, dim=1) - constant) ** 2).mean() * lambda_gp  # added eps
         return gradient_penalty, gradients
     else:
         return 0.0, None
@@ -318,7 +405,8 @@ class ResnetGenerator(nn.Module):
     We adapt Torch code and idea from Justin Johnson's neural style transfer project(https://github.com/jcjohnson/fast-neural-style)
     """
 
-    def __init__(self, input_nc, output_nc, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False, n_blocks=6, padding_type='reflect'):
+    def __init__(self, input_nc, output_nc, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False, n_blocks=6,
+                 padding_type='reflect'):
         """Construct a Resnet-based generator
 
         Parameters:
@@ -330,47 +418,76 @@ class ResnetGenerator(nn.Module):
             n_blocks (int)      -- the number of ResNet blocks
             padding_type (str)  -- the name of padding layer in conv layers: reflect | replicate | zero
         """
-        assert(n_blocks >= 0)
+        assert (n_blocks >= 0)
         super(ResnetGenerator, self).__init__()
         if type(norm_layer) == functools.partial:
             use_bias = norm_layer.func == nn.InstanceNorm2d
         else:
             use_bias = norm_layer == nn.InstanceNorm2d
 
-        model = [nn.ReflectionPad2d(3),
-                 nn.Conv2d(input_nc, ngf, kernel_size=7, padding=0, bias=use_bias),
-                 norm_layer(ngf),
-                 nn.ReLU(True)]
+        model_resnet = []
+        model_lower = []
+        model_upper = [nn.ReflectionPad2d(3),
+                       nn.Conv2d(input_nc, ngf, kernel_size=7, padding=0, bias=use_bias),
+                       norm_layer(ngf),
+                       nn.ReLU(True)]
 
         n_downsampling = 2
         for i in range(n_downsampling):  # add downsampling layers
             mult = 2 ** i
-            model += [nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=1, bias=use_bias),
-                      norm_layer(ngf * mult * 2),
-                      nn.ReLU(True)]
+            model_upper += [nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=1, bias=use_bias),
+                            norm_layer(ngf * mult * 2),
+                            nn.ReLU(True)]
 
         mult = 2 ** n_downsampling
-        for i in range(n_blocks):       # add ResNet blocks
+        for i in range(n_blocks):  # add ResNet blocks
 
-            model += [ResnetBlock(ngf * mult, padding_type=padding_type, norm_layer=norm_layer, use_dropout=use_dropout, use_bias=use_bias)]
+            model_resnet += [
+                ResnetBlock(ngf * mult, padding_type=padding_type, norm_layer=norm_layer, use_dropout=use_dropout,
+                            use_bias=use_bias)]
 
         for i in range(n_downsampling):  # add upsampling layers
             mult = 2 ** (n_downsampling - i)
-            model += [nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
-                                         kernel_size=3, stride=2,
-                                         padding=1, output_padding=1,
-                                         bias=use_bias),
-                      norm_layer(int(ngf * mult / 2)),
-                      nn.ReLU(True)]
-        model += [nn.ReflectionPad2d(3)]
-        model += [nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0)]
-        model += [nn.Tanh()]
+            model_lower += [nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
+                                               kernel_size=3, stride=2,
+                                               padding=1, output_padding=1,
+                                               bias=use_bias),
+                            norm_layer(int(ngf * mult / 2)),
+                            nn.ReLU(True)]
+            # model_lower += [nn.Upsample(scale_factor = 2, mode='bilinear'),
+            #                 nn.ReflectionPad2d(1),
+            #                 nn.Conv2d(ngf * mult, int(ngf * mult / 2),
+            #                           kernel_size=3, stride=1, padding=0),
+            #                 norm_layer(int(ngf * mult / 2)),
+            #                 nn.ReLU(True)]
+        model_lower += [nn.ReflectionPad2d(3)]
+        model_lower += [nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0)]
+        model_lower += [nn.Tanh()]
 
-        self.model = nn.Sequential(*model)
+        self.model_upper = nn.Sequential(*model_upper)
+        self.model_resnet = nn.Sequential(*model_resnet)
+        self.model_lower = nn.Sequential(*model_lower)
 
-    def forward(self, input):
-        """Standard forward"""
-        return self.model(input)
+    def forward(self, input, gating_outputs):
+        """Standard forward
+
+        Parameters:
+            x: image tensor of shape (batch size, channels, height, width)
+            gating_outputs: gating network outputs, 9 tuples (g1, g2) for 8 Resnet blocks in the generator
+                            each tuple convolves (*) with a convolutional layer in the Resnet block (2 per block)
+        """
+        # print('************************************************************************')
+        # print('len(gating_outputs): {}'.format(len(gating_outputs)))
+        # print('len(gating_outputs[0]): {}'.format(len(gating_outputs[0])))
+        # print('gating_outputs[0][0].shape: {}'.format(gating_outputs[0][0].shape))
+        # print('gating_outputs[0][1].shape: {}'.format(gating_outputs[0][1].shape))
+        x_upper = self.model_upper(input)
+        x_resnet = x_upper
+        for ii, resnet_layer in enumerate(self.model_resnet):
+            gating_output = gating_outputs[ii]
+            x_resnet = resnet_layer(x_resnet, gating_output)
+        x_out = self.model_lower(x_resnet)
+        return x_out
 
 
 class ResnetBlock(nn.Module):
@@ -427,10 +544,159 @@ class ResnetBlock(nn.Module):
 
         return nn.Sequential(*conv_block)
 
-    def forward(self, x):
-        """Forward function (with skip connections)"""
-        out = x + self.conv_block(x)  # add skip connections
+    def forward(self, x, gating_output):
+        """Forward function (with skip connections)
+
+        Parameters:
+            x: image tensor of shape (batch size, channels, height, width)
+            gating_output: gating vector to adjust weights in convolutional layer depending on the class type
+        """
+        x_or = x
+        gating_head = 0
+        for ii, model_layer in enumerate(self.conv_block):
+            x = model_layer(x)
+            if isinstance(model_layer, nn.Conv2d):
+                # print('x shape: {}'.format(x.shape))
+                # print('gating_output[gating_head] shape: {}'.format(gating_output[gating_head].shape))
+                x = x * gating_output[gating_head][:, :, None, None]
+                gating_head += 1
+        out = x_or + x  # add skip connections
         return out
+
+
+class EmbeddingNetwork(nn.Module):
+    """Define Embedder"""
+
+    def __init__(self, input_channels, classes):
+        """Initialize the Embedder Network
+
+        Parameters:
+            input_channels (int)     -- the number of channels in the input.
+            classes (int)  -- the number of classes of the input
+
+        Returns a 7 layer convolutional network with a fully connected classifier
+
+        """
+        super(EmbeddingNetwork, self).__init__()
+        self.target_outputs = defaultdict(lambda: None)
+        # embedder_layers = [nn.Conv2d(input_channels, 64, kernel_size=3, stride=2),
+        #                    nn.BatchNorm2d(64),
+        #                    nn.ReLU(),
+        #                    nn.Conv2d(64, 128, kernel_size=3, stride=2),
+        #                    nn.BatchNorm2d(128),
+        #                    nn.ReLU(),
+        #                    nn.Conv2d(128, 256, kernel_size=3, stride=2),
+        #                    nn.BatchNorm2d(256),
+        #                    nn.ReLU(),
+        #                    nn.Conv2d(256, 512, kernel_size=3, stride=2),
+        #                    nn.BatchNorm2d(512),
+        #                    nn.ReLU(),
+        #                    nn.Conv2d(512, 512, kernel_size=3, stride=2),
+        #                    nn.BatchNorm2d(512),
+        #                    nn.ReLU(),
+        #                    nn.Conv2d(512, 512, kernel_size=3, stride=2),
+        #                    nn.BatchNorm2d(512),
+        #                    nn.ReLU(),
+        #                    nn.Conv2d(512, 512, kernel_size=3, stride=2),
+        #                    nn.BatchNorm2d(512),
+        #                    nn.ReLU()]
+        # self.embedder = nn.Sequential(*embedder_layers)
+        # self.fc1 = nn.Linear(512, 64)
+        # self.relu = nn.ReLU()
+        # self.fc2 = nn.Linear(64, classes)
+        embedder_layers = [nn.Conv2d(input_channels, 32, kernel_size=3, stride=2),
+                           nn.BatchNorm2d(32),
+                           nn.ReLU(),
+                           nn.Conv2d(32, 64, kernel_size=3, stride=2),
+                           nn.BatchNorm2d(64),
+                           nn.ReLU(),
+                           nn.Conv2d(64, 128, kernel_size=3, stride=2),
+                           nn.BatchNorm2d(128),
+                           nn.ReLU(),
+                           nn.Conv2d(128, 128, kernel_size=3, stride=2),
+                           nn.BatchNorm2d(128),
+                           nn.ReLU(),
+                           nn.Conv2d(128, 256, kernel_size=3, stride=2),
+                           nn.BatchNorm2d(256),
+                           nn.ReLU(),
+                           nn.Conv2d(256, 512, kernel_size=3, stride=2),
+                           nn.BatchNorm2d(512),
+                           nn.ReLU(),
+                           nn.Conv2d(512, 512, kernel_size=3, stride=2),
+                           nn.BatchNorm2d(512),
+                           nn.ReLU()]
+        self.embedder = nn.Sequential(*embedder_layers)
+        self.fc1 = nn.Linear(512, 64)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(64, classes)
+        # embedder_layers = [nn.Conv2d(input_channels, 16, kernel_size=3, stride=2),
+        #                    nn.BatchNorm2d(16),
+        #                    nn.ReLU(),
+        #                    nn.Conv2d(16, 32, kernel_size=3, stride=2),
+        #                    nn.BatchNorm2d(32),
+        #                    nn.ReLU(),
+        #                    nn.Conv2d(32, 64, kernel_size=3, stride=2),
+        #                    nn.BatchNorm2d(64),
+        #                    nn.ReLU(),
+        #                    nn.Conv2d(64, 128, kernel_size=3, stride=2),
+        #                    nn.BatchNorm2d(128),
+        #                    nn.ReLU(),
+        #                    nn.Conv2d(128, 128, kernel_size=3, stride=2),
+        #                    nn.BatchNorm2d(128),
+        #                    nn.ReLU(),
+        #                    nn.Conv2d(128, 128, kernel_size=3, stride=2),
+        #                    nn.BatchNorm2d(128),
+        #                    nn.ReLU(),
+        #                    nn.Conv2d(128, 128, kernel_size=3, stride=2),
+        #                    nn.BatchNorm2d(128),
+        #                            nn.ReLU()]
+        # self.embedder = nn.Sequential(*embedder_layers)
+        # self.fc1 = nn.Linear(128, 64)
+        # self.relu = nn.ReLU()
+        # self.fc2 = nn.Linear(64, classes)
+
+        # Hook to take output from 1 layer before the classifier, input to gating network
+        def forward_hook(_, __, output):
+            self.target_outputs[threading.get_ident()] = output.detach()
+        self.fc1.register_forward_hook(forward_hook)
+
+    def forward(self, x):
+        """
+        Function for completing a forward pass of EmbeddingNetwork:
+        Embedder is separated from the fully connected layer, a hook
+        can be attached to fc1 to get the gating heads input
+        Parameters:
+            x: image tensor of shape (batch size, channels, height, width)
+        """
+        x = self.embedder(x)
+        x = torch.flatten(x, 1)  # flatten all dimensions except batch
+        x = self.relu(self.fc1(x))
+        x = self.fc2(x)
+
+        thread_id = threading.get_ident()
+        result = self.target_outputs[thread_id]
+        del self.target_outputs[thread_id]
+
+        return x, result
+
+
+class GatingNetwork(nn.Module):
+    """
+        Fully connected layer to map the embdder input to a sparse tensor
+    Values:
+        output_channels: the number of channels matching the Generator (Resnet) Input Channels
+    """
+
+    def __init__(self, input_nc, output_channels):
+        super(GatingNetwork, self).__init__()
+
+        gn_layers = [nn.Linear(input_nc, output_channels),
+                     nn.ReLU()]
+        self.gn = nn.Sequential(*gn_layers)
+
+    def forward(self, x):
+        """Standard forward"""
+        return self.gn(x)
 
 
 class UnetGenerator(nn.Module):
@@ -451,14 +717,19 @@ class UnetGenerator(nn.Module):
         """
         super(UnetGenerator, self).__init__()
         # construct unet structure
-        unet_block = UnetSkipConnectionBlock(ngf * 8, ngf * 8, input_nc=None, submodule=None, norm_layer=norm_layer, innermost=True)  # add the innermost layer
-        for i in range(num_downs - 5):          # add intermediate layers with ngf * 8 filters
-            unet_block = UnetSkipConnectionBlock(ngf * 8, ngf * 8, input_nc=None, submodule=unet_block, norm_layer=norm_layer, use_dropout=use_dropout)
+        unet_block = UnetSkipConnectionBlock(ngf * 8, ngf * 8, input_nc=None, submodule=None, norm_layer=norm_layer,
+                                             innermost=True)  # add the innermost layer
+        for i in range(num_downs - 5):  # add intermediate layers with ngf * 8 filters
+            unet_block = UnetSkipConnectionBlock(ngf * 8, ngf * 8, input_nc=None, submodule=unet_block,
+                                                 norm_layer=norm_layer, use_dropout=use_dropout)
         # gradually reduce the number of filters from ngf * 8 to ngf
-        unet_block = UnetSkipConnectionBlock(ngf * 4, ngf * 8, input_nc=None, submodule=unet_block, norm_layer=norm_layer)
-        unet_block = UnetSkipConnectionBlock(ngf * 2, ngf * 4, input_nc=None, submodule=unet_block, norm_layer=norm_layer)
+        unet_block = UnetSkipConnectionBlock(ngf * 4, ngf * 8, input_nc=None, submodule=unet_block,
+                                             norm_layer=norm_layer)
+        unet_block = UnetSkipConnectionBlock(ngf * 2, ngf * 4, input_nc=None, submodule=unet_block,
+                                             norm_layer=norm_layer)
         unet_block = UnetSkipConnectionBlock(ngf, ngf * 2, input_nc=None, submodule=unet_block, norm_layer=norm_layer)
-        self.model = UnetSkipConnectionBlock(output_nc, ngf, input_nc=input_nc, submodule=unet_block, outermost=True, norm_layer=norm_layer)  # add the outermost layer
+        self.model = UnetSkipConnectionBlock(output_nc, ngf, input_nc=input_nc, submodule=unet_block, outermost=True,
+                                             norm_layer=norm_layer)  # add the outermost layer
 
     def forward(self, input):
         """Standard forward"""
@@ -531,7 +802,7 @@ class UnetSkipConnectionBlock(nn.Module):
     def forward(self, x):
         if self.outermost:
             return self.model(x)
-        else:   # add skip connections
+        else:  # add skip connections
             return torch.cat([x, self.model(x)], 1)
 
 
@@ -575,7 +846,8 @@ class NLayerDiscriminator(nn.Module):
             nn.LeakyReLU(0.2, True)
         ]
 
-        sequence += [nn.Conv2d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)]  # output 1 channel prediction map
+        sequence += [
+            nn.Conv2d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)]  # output 1 channel prediction map
         self.model = nn.Sequential(*sequence)
 
     def forward(self, input):

@@ -16,7 +16,9 @@ class SingleDataset(BaseDataset):
             opt (Option class) -- stores all the experiment flags; needs to be a subclass of BaseOptions
         """
         BaseDataset.__init__(self, opt)
-        self.A_paths = sorted(make_dataset(opt.dataroot, opt.max_dataset_size))
+        # self.A_paths = sorted(make_dataset(opt.dataroot, opt.max_dataset_size))
+        A_paths, A_targets = make_dataset(opt.dataroot, opt.max_dataset_size)  # load images from '/path/to/data/trainA'
+        self.A_paths, self.A_targets = zip(*sorted(zip(A_paths, A_targets)))
         input_nc = self.opt.output_nc if self.opt.direction == 'BtoA' else self.opt.input_nc
         self.transform = get_transform(opt, grayscale=(input_nc == 1))
 
