@@ -102,17 +102,17 @@ class CycleGANModel(BaseModel):
             self.criterionIdt = torch.nn.L1Loss()
             self.criterionEmbedder = torch.nn.CrossEntropyLoss()
             # initialize optimizers; schedulers will be automatically created by function <BaseModel.setup>.
-            if not self.opt.continue_train:
-                print ('Optimize GN and E is default')
-                self.optimizer_G = torch.optim.Adam(itertools.chain(self.netG_A.parameters(), self.netG_B.parameters(),
-                                                    networks.get_gates_params(self.netGN_A),
-                                                    networks.get_gates_params(self.netGN_B),
-                                                    self.netE.parameters()),
-                                                    lr=opt.lr, betas=(opt.beta1, 0.999))
-            else:
-                print ('Skip GN and E optimization')
-                self.optimizer_G = torch.optim.Adam(itertools.chain(self.netG_A.parameters(), self.netG_B.parameters()),
-                                                    lr=opt.lr, betas=(opt.beta1, 0.999))
+            # if not self.opt.continue_train:
+            print ('Optimize GN and E is default')
+            self.optimizer_G = torch.optim.Adam(itertools.chain(self.netG_A.parameters(), self.netG_B.parameters(),
+                                                networks.get_gates_params(self.netGN_A),
+                                                networks.get_gates_params(self.netGN_B),
+                                                self.netE.parameters()),
+                                                lr=opt.lr, betas=(opt.beta1, 0.999))
+            # else:
+            #     print ('Skip GN and E optimization')
+            #     self.optimizer_G = torch.optim.Adam(itertools.chain(self.netG_A.parameters(), self.netG_B.parameters()),
+            #                                         lr=opt.lr, betas=(opt.beta1, 0.999))
             self.optimizer_D = torch.optim.Adam(itertools.chain(self.netD_A.parameters(), self.netD_B.parameters()),
                                                 lr=opt.lr, betas=(opt.beta1, 0.999))
             self.optimizers.append(self.optimizer_G)
