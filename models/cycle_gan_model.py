@@ -103,7 +103,7 @@ class CycleGANModel(BaseModel):
             self.criterionEmbedder = torch.nn.CrossEntropyLoss()
             # initialize optimizers; schedulers will be automatically created by function <BaseModel.setup>.
             if not self.opt.continue_train:
-                print ('Optimize GN and E')
+                print ('Optimize GN and E is default')
                 self.optimizer_G = torch.optim.Adam(itertools.chain(self.netG_A.parameters(), self.netG_B.parameters(),
                                                     networks.get_gates_params(self.netGN_A),
                                                     networks.get_gates_params(self.netGN_B),
