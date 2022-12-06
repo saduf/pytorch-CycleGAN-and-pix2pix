@@ -194,8 +194,8 @@ class CycleGANModel(BaseModel):
         lambda_idt = self.opt.lambda_identity
         lambda_A = self.opt.lambda_A
         lambda_B = self.opt.lambda_B
-        lambda_MOE = self.opt.lambda_MOE if not self.opt.continue_train else 0
-        lambda_GN = self.opt.lambda_GN if not self.opt.continue_train else 0
+        lambda_MOE = self.opt.lambda_MOE
+        lambda_GN = self.opt.lambda_GN
 
         with torch.cuda.amp.autocast():
             # Identity loss
