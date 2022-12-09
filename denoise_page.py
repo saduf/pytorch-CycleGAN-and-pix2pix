@@ -168,6 +168,9 @@ if __name__ == '__main__':
     netGN = get_gating_heads(head_count=9, input_nc=64, output_nc=256, init_type="normal",
                              init_gain=0.02, gpu_ids=[])
 
+    print(type(netGN))
+    print(len(netGN))
+
     load_gating_ckpt(netGN, "latest", "GN_A", chkp_dir, gpu_ids=[])
 
     print("Tiem to init model: {:.2f}".format(time.time() - init_model_start))
@@ -188,30 +191,31 @@ if __name__ == '__main__':
     denoise_start = time.time()
     patches_denoised = []
     transform = get_transform(grayscale=True)
-    for patches_row in img_patches:
-        patches_denoised_row = []
-        for real_arr in patches_row:
-            # print("real real_arr shape : {}".format(real_arr.shape))
-            # print("real real_arr type : {}".format(type(real_arr)))
-            patch_im = Image.fromarray(real_arr)
-            # print("real patch_im shape : {}".format(patch_im.size))
-            # print("real patch_im type : {}".format(type(patch_im)))
-            real = transform(patch_im)
-            real = real.reshape((1, 1, 256, 256))
-            # print("real shape : {}".format(real.shape))
-            # print("real type : {}".format(type(real)))
-            embedder_out, fc1_output = netE(real)
-            fc1_out = torch.flatten(torch.nn.functional.softmax(fc1_output, dim=1), 1)
-            gating_out = get_gating_outputs([netGN], fc1_out)
-            fake = generator_model(real, gating_out[0])
-            # print("fake shape: {}".format(fake.shape))
-            # print("fake type: {}".format(type(fake)))
-            fake = tensor2im(fake)
-            fake = fake.reshape(256, 256)
-            # print("fake2 shape: {}".format(fake.shape))
-            # print("fake2 type: {}".format(type(fake)))
-            patches_denoised_row.append(fake)
-        patches_denoised.append(patches_denoised_row)
+    with torch.no_grad():
+        for patches_row in img_patches:
+            patches_denoised_row = []
+            for real_arr in patches_row:
+                # print("real real_arr shape : {}".format(real_arr.shape))
+                # print("real real_arr type : {}".format(type(real_arr)))
+                patch_im = Image.fromarray(real_arr)
+                # print("real patch_im shape : {}".format(patch_im.size))
+                # print("real patch_im type : {}".format(type(patch_im)))
+                real = transform(patch_im)
+                real = real.reshape((1, 1, 256, 256))
+                # print("real shape : {}".format(real.shape))
+                # print("real type : {}".format(type(real)))
+                embedder_out, fc1_output = netE(real)
+                fc1_out = torch.flatten(torch.nn.functional.softmax(fc1_output, dim=1), 1)
+                gating_out = get_gating_outputs([netGN], fc1_out)
+                fake = generator_model(real, gating_out[0])
+                # print("fake shape: {}".format(fake.shape))
+                # print("fake type: {}".format(type(fake)))
+                fake = tensor2im(fake)
+                fake = fake.reshape(256, 256)
+                # print("fake2 shape: {}".format(fake.shape))
+                # print("fake2 type: {}".format(type(fake)))
+                patches_denoised_row.append(fake)
+            patches_denoised.append(patches_denoised_row)
     print("Time to denoise image: {:.2f}".format(time.time() - denoise_start))
 
     # assemble image from patches
