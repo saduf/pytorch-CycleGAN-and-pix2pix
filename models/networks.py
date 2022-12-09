@@ -5,6 +5,7 @@ import threading
 from collections import defaultdict
 import torch
 import torch.nn as nn
+from typing import Tuple, List
 
 
 ###############################################################################
@@ -97,7 +98,7 @@ def init_weights(net, init_type='normal', init_gain=0.02):
             init.normal_(m.weight.data, 1.0, init_gain)
             init.constant_(m.bias.data, 0.0)
 
-    print('initialize network with %s' % init_type)
+    # print('initialize network with %s' % init_type)
     net.apply(init_func)  # apply the initialization function <init_func>
 
 
@@ -464,29 +465,42 @@ class ResnetGenerator(nn.Module):
         model_lower += [nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0)]
         model_lower += [nn.Tanh()]
 
-        self.model_upper = nn.Sequential(*model_upper)
-        self.model_resnet = nn.Sequential(*model_resnet)
-        self.model_lower = nn.Sequential(*model_lower)
+        self.model_upper = nn.ModuleList(model_upper)
+        self.model_resnet = nn.ModuleList(model_resnet)
+        self.model_lower = nn.ModuleList(model_lower)
 
-    def forward(self, input, gating_outputs):
+    def forward(self, input: torch.Tensor, gating_outputs: List[Tuple[torch.Tensor, torch.Tensor]]):
+    # def forward(self, input, gating_outputs):
         """Standard forward
 
         Parameters:
-            x: image tensor of shape (batch size, channels, height, width)
-            gating_outputs: gating network outputs, 9 tuples (g1, g2) for 8 Resnet blocks in the generator
+            input: image tensor of shape (batch size, channels, height, width)
+            gating_outputs: gating network outputs, 9 tuples (g1, g2) for 9 Resnet blocks in the generator
                             each tuple convolves (*) with a convolutional layer in the Resnet block (2 per block)
         """
         # print('************************************************************************')
         # print('len(gating_outputs): {}'.format(len(gating_outputs)))
+        # # print('type(gating_outputs): {}'.format(type(gating_outputs)))
         # print('len(gating_outputs[0]): {}'.format(len(gating_outputs[0])))
+        # # print('type(gating_outputs[0]): {}'.format(type(gating_outputs[0])))
         # print('gating_outputs[0][0].shape: {}'.format(gating_outputs[0][0].shape))
+        # # print('type(gating_outputs[0][0]): {}'.format(type(gating_outputs[0][0])))
         # print('gating_outputs[0][1].shape: {}'.format(gating_outputs[0][1].shape))
-        x_upper = self.model_upper(input)
+        # # print('type(gating_outputs[0][1]): {}'.format(type(gating_outputs[0][1])))
+        # print('gating_outputs[0][0]: {}'.format(gating_outputs[0][0]))
+        # print('gating_outputs[0][1]: {}'.format(gating_outputs[0][1]))
+        x_upper = input
+        for i, upper_layer in enumerate(self.model_upper):
+            x_upper = upper_layer(x_upper)
+        #x_upper = self.model_upper(input)
         x_resnet = x_upper
         for ii, resnet_layer in enumerate(self.model_resnet):
-            gating_output = gating_outputs[ii]
-            x_resnet = resnet_layer(x_resnet, gating_output)
-        x_out = self.model_lower(x_resnet)
+            g = gating_outputs[ii]
+            x_resnet = resnet_layer(x_resnet, g)
+        x_out = x_resnet
+        for i, lower_layer in enumerate(self.model_lower):
+            x_out = lower_layer(x_out)
+        #x_out = self.model_lower(x_resnet)
         return x_out
 
 
@@ -542,20 +556,29 @@ class ResnetBlock(nn.Module):
             raise NotImplementedError('padding [%s] is not implemented' % padding_type)
         conv_block += [nn.Conv2d(dim, dim, kernel_size=3, padding=p, bias=use_bias), norm_layer(dim)]
 
-        return nn.Sequential(*conv_block)
+        return nn.ModuleList(conv_block)
 
-    def forward(self, x, gating_output):
+    def forward(self, x: torch.Tensor, gating_output: Tuple[torch.Tensor, torch.Tensor]):
+    # def forward(self, x, gating_output):
         """Forward function (with skip connections)
 
         Parameters:
             x: image tensor of shape (batch size, channels, height, width)
             gating_output: gating vector to adjust weights in convolutional layer depending on the class type
         """
+
+        # print('len(gating_output): {}'.format(len(gating_output)))
+        # print('gating_output[0].shape: {}'.format(gating_output[0].shape))
+        # print('gating_output[1].shape: {}'.format(gating_output[1].shape))
+        # print('gating_output[0]: {}'.format(gating_output[0]))
+        # print('gating_output[1]: {}'.format(gating_output[1]))
         x_or = x
         gating_head = 0
         for ii, model_layer in enumerate(self.conv_block):
             x = model_layer(x)
-            if isinstance(model_layer, nn.Conv2d):
+            # print("{} - {}".format(ii, type(model_layer)))
+            # if isinstance(model_layer, nn.Conv2d):
+            if ii == 1 or ii == 5:
                 # print('x shape: {}'.format(x.shape))
                 # print('gating_output[gating_head] shape: {}'.format(gating_output[gating_head].shape))
                 x = x * gating_output[gating_head][:, :, None, None]
@@ -659,6 +682,7 @@ class EmbeddingNetwork(nn.Module):
         def forward_hook(_, __, output):
             self.target_outputs[threading.get_ident()] = output.detach()
         self.fc1.register_forward_hook(forward_hook)
+
 
     def forward(self, x):
         """
