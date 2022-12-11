@@ -124,8 +124,6 @@ if __name__ == '__main__':
 
     total_start = time.time()
 
-    torch._C._jit_set_texpr_fuser_enabled(False)
-
     # construct the argument parse and parse the arguments
     ap = argparse.ArgumentParser()
     required_arg = ap.add_argument_group('required named arguments')
@@ -176,6 +174,10 @@ if __name__ == '__main__':
     patches_denoised = []
     transform = get_transform(grayscale=True)
 
+    # Keep track of time used by every network
+    gen_time = 0
+    e_time = 0
+    gn_time = 0
     with torch.no_grad():
         for patches_row in img_patches:
             patches_denoised_row = []
@@ -183,9 +185,13 @@ if __name__ == '__main__':
                 patch_im = Image.fromarray(real_arr)
                 real = transform(patch_im)
                 real = real.reshape((1, 1, 256, 256))
+                e_start = time.time()
                 embedder_out, fc1_output = netE(real)
+                e_time += time.time() - e_start
+                gn_start = time.time()
                 fc1_out = torch.flatten(torch.nn.functional.softmax(fc1_output, dim=1), 1)
                 gating_out = get_gating_outputs([netGN], fc1_out)
+                gn_time += time.time() - gn_start
                 # print("type: {}".format(type(gating_out)))
                 # print("size: {}".format(len(gating_out)))
                 # print("type: {}".format(type(gating_out[0])))
@@ -196,7 +202,9 @@ if __name__ == '__main__':
                 # print("size: {}".format(len(gating_out[0][0][0])))
                 # print("type: {}".format(type(gating_out[0][0][1])))
                 # print("size: {}".format(len(gating_out[0][0][1])))
+                gen_start = time.time()
                 fake = generator_model(real, gating_out[0])
+                gen_time += time.time() - gen_start
             #     break
             # break
 
@@ -205,6 +213,9 @@ if __name__ == '__main__':
                 patches_denoised_row.append(fake)
             patches_denoised.append(patches_denoised_row)
     print("Time to denoise image: {:.2f}".format(time.time() - denoise_start))
+    print("Embedder time: {:.2f}".format(e_time))
+    print("Gating network time: {:.2f}".format(gn_time))
+    print("Generator time: {:.2f}".format(gen_time))
 
 
     # assemble image from patches
