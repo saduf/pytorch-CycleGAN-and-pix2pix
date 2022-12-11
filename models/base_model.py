@@ -192,7 +192,7 @@ class BaseModel(ABC):
                 else:
                     if isinstance(net, torch.nn.DataParallel):
                         net = net.module
-                    print('loading the model from %s' % load_path)
+                    # print('loading the model from %s' % load_path)
                     # if you are using PyTorch newer than 0.4 (e.g., built from
                     # GitHub source), you can remove str() on self.device
                     state_dict = torch.load(load_path, map_location=str(self.device))
@@ -204,7 +204,7 @@ class BaseModel(ABC):
                         self.__patch_instance_norm_state_dict(state_dict, net, key.split('.'))
                     net.load_state_dict(state_dict)
 
-                    if 'E' == name:
+                    if 'E' == name and not self.isTrain:
                         net.eval()
 
     def print_networks(self, verbose):
@@ -273,13 +273,13 @@ class BaseModel(ABC):
                 )
 
     def load_gating_ckpt(self, gating_network, ckpt_no, model_name):
-        print('len(gating_network: {})'.format(len(gating_network)))
+        # print('len(gating_network: {})'.format(len(gating_network)))
         for idxe, gating_head in enumerate(gating_network):
             load_path = f"{self.save_dir}/gates/{str(ckpt_no).zfill(6) + '_' + str(model_name) + '_' + str(idxe)}.pt"
             print('loading the model from %s' % load_path)
             g = gating_head
-            print('len(gating_head: {})'.format(len(gating_head)))
-            print('len(g): {}'.format(len(g)))
+            # print('len(gating_head: {})'.format(len(gating_head)))
+            # print('len(g): {}'.format(len(g)))
             # for idxi, g in enumerate(gating_head):
             g1_key = 'g1_' + str(model_name) + '_' + str(idxe)
             g2_key = 'g2_' + str(model_name) + '_' + str(idxe)
@@ -292,5 +292,6 @@ class BaseModel(ABC):
             else:
                 g[0].load_state_dict(state_dict[g1_key])
                 g[1].load_state_dict(state_dict[g2_key])
-            g[0].eval()
-            g[1].eval()
+            if not self.isTrain:
+                g[0].eval()
+                g[1].eval()
